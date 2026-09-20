@@ -90,7 +90,8 @@ applies against a policy.
 ## 4. Data model
 
 ```
-project(id, title, description, constraints, created_at, config_id)
+project(id, title, description, constraints, mission_json, mission_version,
+        mode, created_at, config_id)
 config(id, model_roster_json, budget_json, autonomy_json, rubric_versions_json)
 agent(id, name, role, prompt, model, toolset_json, max_parallel, budget_share)
 task(id, project_id, title, dod_json, parent_id, state, assignee_agent_id,
@@ -104,7 +105,28 @@ judgment(id, subject_type, subject_id, seam, request_json, answer_json,
 assumption(id, task_id, text, made_by, reversible, created_at)   -- §7.2
 question(id, task_id, text, parked_at, answered_at, answer)      -- §7.1
 ledger(id, ts, scope, kind, amount, note)                        -- budget accounting
+sync_outbox(id, idem_key, entity_type, entity_id, payload_json, enqueued_at,
+            flushed_at, attempts)                                -- §17.4
+override(id, entity_type, entity_id, field, from_value, to_value, actor,
+         source, created_at)                                     -- §17.5
 ```
+
+**Field glossary** (fields whose names were previously used without definition)
+
+- `task.state` — the seven kanban states, exactly: `queued`, `running`, `blocked`,
+  `needs_input`, `review`, `done`, `failed`. The §10 pipeline is the *project* lifecycle and
+  uses different names (`DRAFT`…`COMPLETE`); the two are deliberately separate vocabularies.
+- `task.success_band` — the categorical gate outcome from `acceptance_verdict`: `rework`,
+  `complete`, or `harvest`. Mirrored to the GitHub `JevBand` field (§17.3).
+- `task.success_score` — the 0–10 report value from `success_score`, carrying
+  `judgment.rubric_version`. Never comparable across rubric versions (§6).
+- `task.reversibility` — one of `read_only`, `reversible`, `destructive`, `external_effect`,
+  produced by the `reversibility` seam. Feeds the §7.1 escalation ladder.
+- `task.blast_radius` — the scope a failed attempt can affect; `task` | `project` | `external`.
+- `project.mode` — `build` or `maintenance` (§13a).
+- `project.mission_json` / `mission_version` — the versioned statement of intent that
+  maintenance-mode triage judges against (§17.7). Every triage `judgment` records the
+  `mission_version` in force when it was made.
 
 **Invariants**
 
@@ -125,7 +147,7 @@ Seams marked **★** are in the MVP.
 | # | Seam | Primitive | Code's job |
 |---|---|---|---|
 | ★ | `task_admission` | Choice | Classify project type; route to a decomposition template |
-| ★ | `definition_of_done_testable` | Choice (+ `none`) | Reject untestable DoDs before they reach the board |
+| ★ | `dod_quality` | Choice (+ `none`) | Reject untestable DoDs before they reach the board |
 | ★ | `split_or_atomic` | Choice | Split monoliths; merge duplicates |
 | ★ | `reversibility` | Choice | Classify blast radius; feeds approval policy |
 | | `duplicate_detection` | Noul × N | Pairwise against a code-shortlisted candidate set |
@@ -166,6 +188,21 @@ Seams marked **★** are in the MVP.
 | ★ | `escalate_to_human` | Noul + confidence | Decide park vs. proceed (§7) |
 | | `queue_priority` | Noul pairwise on top-N | Order the ready queue |
 | | `spend_worthiness` | Noul | Block over-tiered spend |
+
+### 5.5a Maintenance-mode seams (GitHub annex, §17.6)
+
+These are declared here so the seam vocabulary has one home. They are inactive unless
+GitHub sync is enabled and the project is in `maintenance` mode.
+
+| # | Seam | Primitive | Code's job |
+|---|---|---|---|
+| | `spam_likelihood` | Noul | Second-stage spam gate, after deterministic checks |
+| | `issue_actionable` | Noul | Is this a request for work at all? |
+| | `issue_mapping` | Choice | `new_task` / `append_existing` / `split` / `needs_info` / `not_actionable` |
+
+The maintenance intake chain is: deterministic spam checks → `spam_likelihood` →
+`issue_actionable` → `issue_mapping` → `dod_quality` → `context_relevance`. Every seam in
+that chain is defined above (`dod_quality` in §5.1, `context_relevance` in §5.2).
 
 ### 5.6 Hard rules for every seam
 
@@ -231,8 +268,41 @@ separately (three copies drift).
   3.73/10 under the action ladder. => **Never compare scores across rubric versions.**
   Thresholds are stored *with* the rubric version and re-tuned when the rubric changes.
 
-**Second rubric**, `dod_quality@1.json`, gates DoDs before they reach the board
-(untestable / unmeasurable / circular / contradicts_constraints / `none`).
+**Second rubric**, `dod_quality@1.json`. Same shape as above — `id`, `type`, `instructions`,
+`criteria` — and it gates DoDs before they reach the board.
+
+```json
+{
+  "version": "dod_quality@1",
+  "rubric": {
+    "id": "dod_quality",
+    "type": "choice",
+    "instructions": "Does this task's definition of done describe something that can be objectively verified as met or not met? Choose none if it is adequately testable.",
+    "criteria": {
+      "untestable": "Cannot be objectively checked; success is a matter of opinion",
+      "unmeasurable": "Describes a goal with no observable completion condition",
+      "circular": "Verification depends on the thing being verified",
+      "contradicts_constraints": "Cannot be satisfied without violating a stated project constraint",
+      "implementation_specified": "Prescribes a method rather than specifying an outcome",
+      "none": "Adequately testable as written"
+    }
+  }
+}
+```
+
+**File contract for every rubric file**
+
+- `version` — the filename stem verbatim, e.g. `success_scale@1`. Recorded on every
+  `judgment` row. A rubric edit **must** bump the version; thresholds are stored alongside
+  the version and re-tuned when it changes (§6 measured property 4).
+- `rubric.id` — the seam name this rubric serves (§5). One rubric file per gated seam.
+- `rubric.type` — `choice`, `noul`, or `score`.
+- `rubric.criteria` — for `choice`, a map of option → description, and it **must** include a
+  `none` (or `unknown`) option so "no match" is measurable rather than forced.
+- Code generates the Choice criteria sent to Jev from this file. Prose documentation is
+  derived from it, never authored separately — three copies drift (§6).
+- A rubric file is the unit of review: changing one is a reviewable diff, and the
+  `rubric_versions_json` on the project config pins which versions a run used.
 
 ---
 
@@ -367,6 +437,32 @@ DRAFT ──▸ PLANNING ──▸ PROPOSED ──▸ GO ──▸ RUNNING ⇄ P
 Transitions are a hard-coded table. Any transition not in the table is a bug, not a
 policy question. Checkpoint after every transition: on restart the board resumes at the
 last transition, and completed work is never redone (idempotent by `task_id` + `attempt`).
+
+**The transition table.** This is the authoritative list. Any transition not in it is a bug,
+not a policy question. "Cause" names what fired the transition.
+
+| From | To | Cause | Guard |
+|---|---|---|---|
+| `queued` | `running` | scheduler dispatch | concurrency slot free ∧ budget OK ∧ deps satisfied ∧ not `dry_run` |
+| `queued` | `blocked` | dependency not satisfied | any inbound `blocks` edge unresolved |
+| `running` | `review` | agent returned | result artifact written |
+| `running` | `blocked` | `status_classification` = blocked | — |
+| `running` | `needs_input` | `escalate_to_human` = park | question row written |
+| `running` | `failed` | run error, or `loop_breaker` fired | — |
+| `blocked` | `queued` | inbound deps resolved | checkpoint flush |
+| `needs_input` | `queued` | question answered | rung-4 authorization present if `destructive` |
+| `review` | `running` | `acceptance_verdict` = `rework` | `attempt` < `max_attempts` |
+| `review` | `done` | `acceptance_verdict` = `complete` or `harvest` | success_score + band recorded |
+| `review` | `needs_input` | `criterion_failed` needs a human decision | — |
+| `review` | `queued` | task re-specified (`bad_spec` recovery) | new `dod_json` written |
+| `failed` | `queued` | recovery path selected, retry permitted | `attempt` < `max_attempts` ∧ recovery ≠ park |
+| `failed` | `needs_input` | recovery = park (`environment`) | question row written |
+| `failed` | `queued` (new subtree) | recovery = re-decompose | parent task replaced |
+| `done` | `queued` | human override (audited, §17.5) | `override` row written; reopening by the harness is a new task, not a transition |
+
+**Project lifecycle** (`project.mode`-independent) is the §10 diagram: `DRAFT → PLANNING →
+PROPOSED → RUNNING ⇄ PARKED → REVIEWING → CLOSING → COMPLETE`, with `FAILED → attribution →
+retry | respec | park`. Task states and project states are separate vocabularies (§4 glossary).
 
 **Demo:** before `GO` is pressed the plan is fully materialized — DAG, agents, DoDs,
 budgets. `dry_run` can execute this entire path end-to-end with zero agent spend, which
@@ -600,8 +696,8 @@ It is **not** automatically a task: two issues may be one task, one issue may be
 3. **`issue_mapping`** (Choice): `new_task` / `append_existing` / `split` / `needs_info` /
    `not_actionable`. Shortlist candidate existing tasks in code (semantic similarity), then
    judge — never a Choice over the whole backlog.
-4. **`dod_quality`** on the derived DoD — an issue that cannot be restated testably parks as
-   `needs-info` rather than being delegated.
+4. **`dod_quality`** (§5.1) on the derived DoD — an issue whose DoD cannot be restated
+   testably parks as `needs_input` rather than being delegated.
 5. **`context_relevance`** against the mission statement: in scope, adjacent, or out of scope.
 
 **Every outcome produces a comment**, including rejection — a triage comment explaining
@@ -610,6 +706,10 @@ question, and re-enter the chain when answered.
 
 **Critical constraint:** an issue can never trigger a destructive or external-effect action.
 The §7.3 authority ceiling applies with no exceptions for externally-authored input.
+
+Note the distinction between the **task state** `needs_input` and the **GitHub label**
+`jev:needs-info`: the label is the human-visible mirror of the task state, and the §17.5
+precedence rules apply to the state, not the label.
 
 ### 17.7 Mission state
 

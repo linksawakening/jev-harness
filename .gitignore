@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+!env.example
+
+# Runtime state
+*.db
+*.sqlite
+*.sqlite3
+probe-cache.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

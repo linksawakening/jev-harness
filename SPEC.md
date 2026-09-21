@@ -18,10 +18,25 @@ quantitative success score back.
 **Non-goals**
 
 - Not a chat interface. The user is not a co-pilot; the system is expected to run unattended.
+- **Not a plugin, wrapper, or extension of any existing agent framework.** It does not require
+  Hermes, does not depend on Hermes' Kanban, and does not delegate its own loop to another
+  agent. It is a standalone harness with its own store, its own scheduler, and its own
+  state machine. If it is ever convenient to *drive* it from another system, that system is a
+  client of its API and nothing more.
+- **Not built on a pre-existing task board.** The task graph, claim semantics, checkpoints,
+  and audit log are specified here and implemented here (§3–§4, §10). A general-purpose board
+  may exist on the host machine; it is not this system's substrate, and importing its schema
+  or its semantics would mean inheriting decisions this spec does not make.
 - Not a general agent framework. It orchestrates *this* machine's agents on *this* user's projects.
 - Not multi-tenant. Single user, single machine, no auth beyond network locality.
 - Not a replacement for human judgement on consequential actions. It never escalates its
   own authority (§7.3).
+
+**Interoperability boundary.** The harness *may* integrate with external tools in the
+directions the spec already defines — GitHub as an optional mirror (§17), and delegated
+agents as subprocesses it spawns and supervises itself. Those are integrations at the edges.
+The core loop, the state machine, and the store are self-contained and must be runnable on a
+machine with nothing else installed but Python and network access to the judge API.
 
 ---
 
@@ -538,6 +553,10 @@ tasks remain open. This is a mode flag on the project, not two separate systems.
 ---
 
 ## 14. Phased delivery
+
+Phase 1 is the scheduler and store, built here, from scratch. There is no framework to
+introduce and no board to wrap: §3–§4 and §10 are the design, and they are the whole of the
+component. A general-purpose task board on the host machine is *not* an input to any phase.
 
 **Phase 0 — Judge layer (no UI).**
 Rubric files, `judge.py`, shortlist-in-code, one-request-per-subject, the audit table.

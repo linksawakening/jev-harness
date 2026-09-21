@@ -1,42 +1,82 @@
-# Jev Task Harness — Specification v0.1
+# Jev Task Harness — Specification v0.2
 
 **Status:** Draft for review
 **Author:** Hermes Agent (Link)
-**Date:** 2026-09-20
+**Date:** 2026-09-21
 **Scope:** A self-hosted, single-user system that takes a project description, proposes an
 agent team, and then runs a kanban board to completion with minimal human input.
 
+v0.2 rewrites v0.1 to narrow the scope. What changed, and why:
+
+- The interface is a **locally hosted HTML dashboard** (§9). There is no other UI.
+- **No other harness.** The system is self-contained — its own store, its own scheduler,
+  its own loop (§1, §3). It is not built on or driven by Hermes, OpenCoder, or any other
+  agent framework.
+- **No GitHub Projects, and no external task board.** All GitHub integration is removed,
+  including maintenance mode and issue triage (§18.1). An external board would need an
+  identity per agent and offers no transactions.
+- Everything else — the judge layer, the seams, the rubrics, the lifecycle, the autonomy
+  policy — is carried over from v0.1 unchanged. The numbers measured against `jev-1.13.0`
+  still hold.
+
 ---
 
-## 1. Purpose
+## 1. Purpose and scope
 
 Give one person a system where they describe a large project once, approve a starting
 configuration once, press **Go**, and walk away. The system decomposes the work, staffs
 it, schedules it, supervises it, verifies results against stated criteria, and reports a
 quantitative success score back.
 
-**Non-goals**
+### 1.1 Scope statement
 
-- Not a chat interface. The user is not a co-pilot; the system is expected to run unattended.
-- **Not a plugin, wrapper, or extension of any existing agent framework.** It does not require
-  Hermes, does not depend on Hermes' Kanban, and does not delegate its own loop to another
-  agent. It is a standalone harness with its own store, its own scheduler, and its own
-  state machine. If it is ever convenient to *drive* it from another system, that system is a
-  client of its API and nothing more.
-- **Not built on a pre-existing task board.** The task graph, claim semantics, checkpoints,
-  and audit log are specified here and implemented here (§3–§4, §10). A general-purpose board
-  may exist on the host machine; it is not this system's substrate, and importing its schema
-  or its semantics would mean inheriting decisions this spec does not make.
-- Not a general agent framework. It orchestrates *this* machine's agents on *this* user's projects.
-- Not multi-tenant. Single user, single machine, no auth beyond network locality.
-- Not a replacement for human judgement on consequential actions. It never escalates its
-  own authority (§7.3).
+This is the whole system:
 
-**Interoperability boundary.** The harness *may* integrate with external tools in the
-directions the spec already defines — GitHub as an optional mirror (§17), and delegated
-agents as subprocesses it spawns and supervises itself. Those are integrations at the edges.
-The core loop, the state machine, and the store are self-contained and must be runnable on a
-machine with nothing else installed but Python and network access to the judge API.
+- **One process.** A single Python application. It serves the dashboard, runs the
+  scheduler loop, and holds the store.
+- **One store.** A single SQLite file, plus one directory of git-backed work products.
+  No database server, no message broker, no cache.
+- **One interface.** A locally hosted HTML dashboard served by that process (§9). Static
+  files, no build step, no package manager, no external asset host.
+- **One external dependency.** Network access to the judge API (§5). Everything else runs
+  on the machine.
+
+A machine with Python, the harness directory, and network access to the judge API can run
+the whole system. Nothing else needs to be installed, configured, or kept running.
+
+### 1.2 Non-goals
+
+- **Not a plugin, wrapper, or extension of any existing agent framework.** It does not
+  require Hermes, does not depend on Hermes Kanban, and does not delegate its own loop to
+  another agent. It is a standalone harness with its own store, its own scheduler, and its
+  own state machine. If it is ever convenient to *drive* it from another system, that
+  system is a client of its API and nothing more.
+- **Not built on a pre-existing task board, and not mirrored to one.** The task graph,
+  claim semantics, checkpoints, and audit log are specified here and implemented here
+  (§3–§4, §10). The board is rendered by the local dashboard. There is no GitHub Projects
+  integration, no issue tracker integration, and no import of any external board's schema
+  or semantics — see §18.1 for why this was removed.
+- **Not multi-tenant.** Single user, single machine, no auth beyond network locality.
+- **Not a chat interface.** The user is not a co-pilot; the system is expected to run
+  unattended.
+- **Not a general agent framework.** It orchestrates *this* machine's agents on *this*
+  user's projects.
+- **Not a replacement for human judgement on consequential actions.** It never escalates
+  its own authority (§7.3).
+
+### 1.3 Interoperability boundary
+
+The system is closed by default. Two integrations are permitted, and both are edges, not
+substrate:
+
+- **Agent subprocesses.** The harness spawns delegated agents itself, as child processes it
+  owns, supervises, and terminates. Which CLI or framework that subprocess happens to be is
+  a runtime detail (§3); the loop, the state machine, and the store stay here.
+- **A read-only client API.** Another system may call this API to observe or drive a run.
+  It gets no special access: it is a client, with the same surface as the dashboard.
+
+Nothing else crosses the boundary. There is no sync, no mirror, no webhook, and no
+external identity.
 
 ---
 
@@ -63,20 +103,22 @@ applies against a policy.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Web UI  (single-page, local, Tailscale-reachable)           │
-│   Screen 1: Project  ·  Screen 2: Settings  ·  Screen 3: Team│
+│  Dashboard  (locally hosted HTML, single page)               │
+│   static files served by this same process                   │
+│   Screen 1: Project · Screen 2: Settings · Screen 3: Team    │
 │   Screen 4: Board (live)                                     │
 └───────────────────────────┬──────────────────────────────────┘
                             │ HTTP (localhost / tailnet only)
 ┌───────────────────────────▼──────────────────────────────────┐
 │  API  (FastAPI)                                              │
 │   /project /config /plan /board /runs /audit /kill           │
+│   also serves the dashboard's static files                   │
 └───────┬──────────────────┬──────────────────┬────────────────┘
         │                  │                  │
 ┌───────▼───────┐  ┌───────▼────────┐  ┌──────▼───────────────┐
 │  Scheduler    │  │  Judge Layer   │  │  Agent Runtime       │
-│  (DAG, queues │  │  judges/       │  │  (delegation: OAC /  │
-│   concurrency │  │   *.json       │  │   OpenCoder / local  │
+│  (DAG, queues │  │  judges/       │  │  (spawns delegated   │
+│   concurrency │  │   *.json       │  │   agents as child    │
 │   budgets)    │  │  judge.py      │  │   processes)         │
 └───────┬───────┘  └───────┬────────┘  └──────┬───────────────┘
         │                  │                  │
@@ -86,17 +128,24 @@ applies against a policy.
 └──────────────────────────────────────────────────────────────┘
 ```
 
+The box labelled **Dashboard** is static HTML/CSS/JS on disk, served by the API process.
+There is no separate frontend build, dev server, or bundler.
+
 **Components**
 
-- **UI** — four screens; the only human surface. Local-only binding; reachable over Tailscale.
-- **API** — thin. All mutations go through the scheduler.
+- **Dashboard** — four screens of static HTML driven by `fetch` against the local API; the
+  only human surface. Same-origin with the API, so no CORS, no tokens, no session state.
+  Local-only binding; reachable over Tailscale.
+- **API** — thin. All mutations go through the scheduler. Also the static file server for
+  the dashboard.
 - **Scheduler** — the state machine. Owns the DAG, ready-queue, concurrency slots,
   budget ledger, retry ladder, and checkpointing.
 - **Judge Layer** — wraps Jev. Loads versioned rubric files, shortlists candidates in code,
   makes one request per subject, records the raw answer + rubric version + model version.
-- **Agent Runtime** — spawns delegated agents. Each agent is a bundle of
-  `{prompt, model, toolset, workdir, budget}`. Adapts to whatever delegation target is
-  configured; the harness does not care which.
+- **Agent Runtime** — spawns delegated agents as child processes of this harness. Each
+  agent is a bundle of `{prompt, model, toolset, workdir, budget}`. Its adapts to whatever
+  delegation target is configured; the harness does not care which, and does not depend on
+  any of them being present to start.
 - **Store** — SQLite for all structured state. Agent work products live in git-backed
   directories so every intermediate state is diffable and recoverable.
 
@@ -105,8 +154,7 @@ applies against a policy.
 ## 4. Data model
 
 ```
-project(id, title, description, constraints, mission_json, mission_version,
-        mode, created_at, config_id)
+project(id, title, description, constraints, created_at, config_id)
 config(id, model_roster_json, budget_json, autonomy_json, rubric_versions_json)
 agent(id, name, role, prompt, model, toolset_json, max_parallel, budget_share)
 task(id, project_id, title, dod_json, parent_id, state, assignee_agent_id,
@@ -120,10 +168,8 @@ judgment(id, subject_type, subject_id, seam, request_json, answer_json,
 assumption(id, task_id, text, made_by, reversible, created_at)   -- §7.2
 question(id, task_id, text, parked_at, answered_at, answer)      -- §7.1
 ledger(id, ts, scope, kind, amount, note)                        -- budget accounting
-sync_outbox(id, idem_key, entity_type, entity_id, payload_json, enqueued_at,
-            flushed_at, attempts)                                -- §17.4
 override(id, entity_type, entity_id, field, from_value, to_value, actor,
-         source, created_at)                                     -- §17.5
+         source, created_at)                                     -- §7.5 (dashboard edits)
 ```
 
 **Field glossary** (fields whose names were previously used without definition)
@@ -132,20 +178,20 @@ override(id, entity_type, entity_id, field, from_value, to_value, actor,
   `needs_input`, `review`, `done`, `failed`. The §10 pipeline is the *project* lifecycle and
   uses different names (`DRAFT`…`COMPLETE`); the two are deliberately separate vocabularies.
 - `task.success_band` — the categorical gate outcome from `acceptance_verdict`: `rework`,
-  `complete`, or `harvest`. Mirrored to the GitHub `JevBand` field (§17.3).
+  `complete`, or `harvest`.
 - `task.success_score` — the 0–10 report value from `success_score`, carrying
   `judgment.rubric_version`. Never comparable across rubric versions (§6).
 - `task.reversibility` — one of `read_only`, `reversible`, `destructive`, `external_effect`,
   produced by the `reversibility` seam. Feeds the §7.1 escalation ladder.
 - `task.blast_radius` — the scope a failed attempt can affect; `task` | `project` | `external`.
-- `project.mode` — `build` or `maintenance` (§13a).
-- `project.mission_json` / `mission_version` — the versioned statement of intent that
-  maintenance-mode triage judges against (§17.7). Every triage `judgment` records the
-  `mission_version` in force when it was made.
+- `override.source` — where the human edit came from. In this version there is exactly one
+  value, `dashboard`. It exists as an enumerated field (not a boolean) so a future client
+  can be added without a migration.
 
 **Invariants**
 
-- A task's `state` is mutated only by the scheduler, and only via an explicit transition table.
+- A task's `state` is mutated only by the scheduler, and only via an explicit transition
+  table.
 - Every `judgment` row stores enough to reproduce the decision offline (request, rubric
   version, model version). Judgments are immutable; correction is a new row.
 - Costs are integer micro-USD. No floats in money.
@@ -203,21 +249,6 @@ Seams marked **★** are in the MVP.
 | ★ | `escalate_to_human` | Noul + confidence | Decide park vs. proceed (§7) |
 | | `queue_priority` | Noul pairwise on top-N | Order the ready queue |
 | | `spend_worthiness` | Noul | Block over-tiered spend |
-
-### 5.5a Maintenance-mode seams (GitHub annex, §17.6)
-
-These are declared here so the seam vocabulary has one home. They are inactive unless
-GitHub sync is enabled and the project is in `maintenance` mode.
-
-| # | Seam | Primitive | Code's job |
-|---|---|---|---|
-| | `spam_likelihood` | Noul | Second-stage spam gate, after deterministic checks |
-| | `issue_actionable` | Noul | Is this a request for work at all? |
-| | `issue_mapping` | Choice | `new_task` / `append_existing` / `split` / `needs_info` / `not_actionable` |
-
-The maintenance intake chain is: deterministic spam checks → `spam_likelihood` →
-`issue_actionable` → `issue_mapping` → `dod_quality` → `context_relevance`. Every seam in
-that chain is defined above (`dod_quality` in §5.1, `context_relevance` in §5.2).
 
 ### 5.6 Hard rules for every seam
 
@@ -315,7 +346,7 @@ separately (three copies drift).
 - `rubric.criteria` — for `choice`, a map of option → description, and it **must** include a
   `none` (or `unknown`) option so "no match" is measurable rather than forced.
 - Code generates the Choice criteria sent to Jev from this file. Prose documentation is
-  derived from it, never authored separately — three copies drift (§6).
+  derived from it, never authored separately — three copies drift.
 - A rubric file is the unit of review: changing one is a reviewable diff, and the
   `rubric_versions_json` on the project config pins which versions a run used.
 
@@ -370,6 +401,17 @@ The harness measures `interventions / completed_tasks` per project. The goal is 
 number. A project that required three questions is a data point, not a failure — but it
 must be *counted*.
 
+### 7.5 Human edits from the dashboard
+
+The dashboard is the only human surface, so it is also the only source of `override` rows.
+The precedence rule:
+
+- **Human edits to `task.state` win.** The scheduler reflects the edit into the store as an
+  audited `override` row (who, when, from, to) and proceeds from the new state.
+- **The harness exclusively owns `success_band`, `success_score`, `attempt`, and run cost.**
+  These are computed outputs of judgments. A human edit is overwritten on the next tick and
+  the overwrite is logged.
+
 ---
 
 ## 8. Guardrails
@@ -394,9 +436,24 @@ to make that visible, not to conserve Jev.
 
 ---
 
-## 9. UI specification
+## 9. Dashboard (the local HTML interface)
 
-Four screens. Every screen is read-mostly; only screens 1–3 accept input.
+The human interface is a **locally hosted HTML dashboard**. That is a hard constraint, not
+a placeholder for a "real" UI later.
+
+**What "locally hosted HTML" means here:**
+
+- Static `.html`, `.css`, and `.js` files on disk, in the repo, served by the same process
+  as the API. Same origin, so no CORS configuration and no auth token.
+- **No build step.** No bundler, no transpiler, no package manager, no framework. If a file
+  has to be compiled before the browser sees it, it is out of scope.
+- **No external assets.** No CDN, no web fonts, no analytics, no third-party script. The
+  page works on a machine with no internet access once loaded; the only network calls it
+  makes are to its own API.
+- Data flows by `fetch` against the local API and by a polling loop or Server-Sent Events
+  for live updates. No websocket library dependency.
+
+**The four screens.** Every screen is read-mostly; only screens 1–3 accept input.
 
 ### Screen 1 — Project
 
@@ -409,6 +466,7 @@ Four screens. Every screen is read-mostly; only screens 1–3 accept input.
 - **Model roster**: rows of `{label, provider, model_id, tier(cheap|mid|frontier),
   cost_per_mtok_in, cost_per_mtok_out, toolset, enabled}`. This is the *only* place
   models are configured; the roster is what the `agent_selection` shortlist draws from.
+  It is a local file/database list — no external model registry, no account linking.
 - **Budgets**: tokens, USD, wall clock, max concurrent.
 - **Autonomy**: policy (`default` | `strict`), assumption limit, question batching window.
 - **Judge**: Jev model id (pinned, e.g. `jev-1.13.0`), rubric versions, review threshold.
@@ -419,7 +477,7 @@ Four screens. Every screen is read-mostly; only screens 1–3 accept input.
 - **Decomposition panel**: the proposed task list as a DAG, each task showing its DoD and
   the assigned agent. Flagged items from `dod_quality` are highlighted with the reason.
 - **Team panel**: proposed agents, each with role, model, toolset, and the Jev
-  `capability_fit` score that justified it. Agents are proposed from the live roster —
+  `capability_fit` score that justified it. Agents are proposed from the configured roster —
   never hardcoded — and the LLM must show which roster entry each maps to.
 - **Assumptions preview**: what the system intends to decide on its own.
 - **Estimated cost and duration**: from the ledger model, before any spend.
@@ -432,11 +490,14 @@ Four screens. Every screen is read-mostly; only screens 1–3 accept input.
 - Per card: assignee, attempt count, model tier, elapsed, cost, and the current success
   band once closed
 - **Questions drawer**: batched parked questions, answerable in one sitting
-- **Assumptions drawer**: every route-1 decision, individually revertible
+- **Assumptions drawer**: every rung-1 decision, individually revertible
 - **Kill switch**, always visible
 - **Final report**: on completion, a per-task success score (0–10), the band, every
   assumption, every escalation, total cost, and the intervention rate. Exportable as
   Markdown.
+
+The board is rendered from the local store. It is never a projection of, or a mirror to,
+anything external (§18.1).
 
 ---
 
@@ -449,9 +510,9 @@ DRAFT ──▸ PLANNING ──▸ PROPOSED ──▸ GO ──▸ RUNNING ⇄ P
                                              └─▸ FAILED ──▸ (attribution) ──▸ retry | respec | park
 ```
 
-Transitions are a hard-coded table. Any transition not in the table is a bug, not a
-policy question. Checkpoint after every transition: on restart the board resumes at the
-last transition, and completed work is never redone (idempotent by `task_id` + `attempt`).
+Transitions are a hard-coded table. Checkpoint after every transition: on restart the board
+resumes at the last transition, and completed work is never redone (idempotent by
+`task_id` + `attempt`).
 
 **The transition table.** This is the authoritative list. Any transition not in it is a bug,
 not a policy question. "Cause" names what fired the transition.
@@ -473,11 +534,16 @@ not a policy question. "Cause" names what fired the transition.
 | `failed` | `queued` | recovery path selected, retry permitted | `attempt` < `max_attempts` ∧ recovery ≠ park |
 | `failed` | `needs_input` | recovery = park (`environment`) | question row written |
 | `failed` | `queued` (new subtree) | recovery = re-decompose | parent task replaced |
-| `done` | `queued` | human override (audited, §17.5) | `override` row written; reopening by the harness is a new task, not a transition |
+| `done` | `queued` | human override from the dashboard (§7.5) | `override` row written; reopening by the harness is a new task, not a transition |
 
-**Project lifecycle** (`project.mode`-independent) is the §10 diagram: `DRAFT → PLANNING →
-PROPOSED → RUNNING ⇄ PARKED → REVIEWING → CLOSING → COMPLETE`, with `FAILED → attribution →
-retry | respec | park`. Task states and project states are separate vocabularies (§4 glossary).
+**Terminal states.** `done` and `failed` are terminal *for the harness*. The only thing that
+can move them is a human edit from the dashboard (§7.5), which is recorded as an `override`
+row and is by construction outside the loop. No seam, no retry ladder, and no agent can move
+a task out of `done` or `failed`.
+
+**Project lifecycle** (`§10` diagram) is `DRAFT → PLANNING → PROPOSED → RUNNING ⇄ PARKED →
+REVIEWING → CLOSING → COMPLETE`, with `FAILED → attribution → retry | respec | park`. Task
+states and project states are separate vocabularies (§4 glossary).
 
 **Demo:** before `GO` is pressed the plan is fully materialized — DAG, agents, DoDs,
 budgets. `dry_run` can execute this entire path end-to-end with zero agent spend, which
@@ -504,10 +570,12 @@ path. Without this, the harness can only blanket-retry.
 ## 12. Observability and audit
 
 - Every judgment is persisted with its exact request, rubric version, and model version.
-- `SUCCESS_SCORE` is only reported with its rubric version attached.
+- `success_score` is only reported with its rubric version attached.
 - A run is fully reconstructible offline from `judgment` + `run` + `ledger`.
 - Structured logs, one line per transition: `ts, task_id, from, to, cause, judgment_id`.
 - The audit view answers: *why did this task get this agent, this score, this decision?*
+- The audit view is a screen in the local dashboard, reading the local store. It needs no
+  external service to answer that question.
 
 ---
 
@@ -526,33 +594,32 @@ Each is testable, and the tests are written first.
 8. Judging cost for a 100-task project stays under $1.
 9. The intervention rate is reported for every run.
 10. All three measured rubric properties hold on a held-out fixture set: monotone ordering,
-    sd ≤ 0.10 normalised, gate stability (`0` label flips across 3 repeats).
+    sd ≤ 0.10 normalised, gate stability (0 label flips across 3 repeats).
 11. Quality gates: `ruff`, `mypy --strict`, `pytest` green before any commit.
-12. **Mirror integrity (§17):** with GitHub sync enabled, a mid-run crash between a local
-    transition and its GitHub write reconciles on restart with no duplicate or lost
-    transition, and the local store is never mutated by a GitHub read.
-13. **Rate-budget (§17.3):** a 100-task project with GitHub sync on stays under 2,000
-    GraphQL points per hour, enforced by a token-bucket that degrades sync, never the loop.
+12. **Self-containment:** a fresh clone plus Python plus a judge API key runs the full
+    system with no other framework installed, no GitHub token, and no external board.
+    The dashboard loads and functions with the machine's network cable pulled (the only
+    degraded function being judge calls).
+13. **No external identity:** no code path in the harness requires an account, token, or
+    identity for any agent, on any external service.
 
 ---
 
-## 13a. Operating modes
+## 14. Operating modes
 
-The harness has two modes. They share the store, the judge layer, and the agent runtime;
-they differ in what drives the loop.
+The harness shape is one mode. v0.1 described a second (`maintenance`) and an annex that
+implemented it; both are removed (§18.1). What remains:
 
 - **Build mode** — the user describes a project; the harness decomposes, staffs, and runs it
-  to completion. Finishes. Described in §1–§16.
-- **Maintenance mode** — a continuous, cron-shaped loop that watches one or more repos,
-  triages incoming issues against the mission, and keeps the board current. Never finishes.
-  Described in §17.6.
+  to completion. Finishes. This is the whole of this version.
 
-A single project may be in build mode initially and transition to maintenance mode once no
-tasks remain open. This is a mode flag on the project, not two separate systems.
+A future maintenance loop is not designed here. If it returns, it returns on the same
+judge layer and the same store, driven by a local scheduler tick — not by an external
+tracker, and not requiring an identity per agent.
 
 ---
 
-## 14. Phased delivery
+## 15. Phased delivery
 
 Phase 1 is the scheduler and store, built here, from scratch. There is no framework to
 introduce and no board to wrap: §3–§4 and §10 are the design, and they are the whole of the
@@ -560,21 +627,22 @@ component. A general-purpose task board on the host machine is *not* an input to
 
 **Phase 0 — Judge layer (no UI).**
 Rubric files, `judge.py`, shortlist-in-code, one-request-per-subject, the audit table.
-Prove §13.10 on fixtures. *This is already partly done: `~/.hermes/cache/scratch/jev_score_truth.py`.*
+Prove §13.10 on fixtures. *This is already partly done: `probes/jev_score_truth.py`.*
 
 **Phase 1 — Scheduler + store.**
 State machine, DAG, checkpoints, budgets, ledger, retry ladder. Tested with a fake agent
 that returns scripted outcomes. No LLM, no Jev beyond the seams already proven.
 
 **Phase 2 — Planning.**
-Decomposition via LLM, `dod_quality` gate, agent proposal from live roster, cost estimate.
-Dry run end-to-end.
+Decomposition via LLM, `dod_quality` gate, agent proposal from the configured roster, cost
+estimate. Dry run end-to-end.
 
 **Phase 3 — Agent runtime.**
-Real delegation. Concurrency, budgets, kill switch, transcript capture.
+Real delegation as owned subprocesses. Concurrency, budgets, kill switch, transcript capture.
 
-**Phase 4 — UI.**
-Four screens. Board, drawers, kill switch, final report.
+**Phase 4 — Dashboard.**
+Static HTML. Four screens. Board, drawers, kill switch, final report. Served by the API
+process; no build step, no external assets.
 
 **Phase 5 — Autonomy tuning.**
 Escalation ladder, assumption ledger, intervention-rate measurement, threshold re-tuning
@@ -582,12 +650,13 @@ against real runs.
 
 ---
 
-## 15. Decisions made (outstanding questions, resolved)
+## 16. Decisions made (outstanding questions, resolved)
 
-Where the request was silent, these are the calls I made — each reversible.
+Where the request was silent, these are the calls made. Each is reversible.
 
 1. **Storage:** SQLite + git-backed work dirs. No external services. Survives a restart.
-2. **Hosting:** local FastAPI, bound to localhost and the Tailscale interface. No cloud, no auth beyond network locality.
+2. **Hosting:** local FastAPI, bound to localhost and the Tailscale interface. No cloud, no
+   auth beyond network locality. The same process serves the dashboard's static files.
 3. **The board never blocks on one task.** Park-and-continue is the default, not halt.
 4. **Assumptions are the primary answer to "no input".** Decide, log, report, revert.
 5. **Approval covers the plan, not just the team.** Decomposition and DoDs are where
@@ -599,177 +668,56 @@ Where the request was silent, these are the calls I made — each reversible.
 8. **Rubrics are versioned files, and thresholds live with them.** Measured ladder-dependence
    (6.69 vs 3.73 for the same state) makes cross-rubric comparison unsafe.
 9. **`max_attempts = 3`, `max_concurrent = 3`.** Conservative defaults; both configurable.
-10. **Agents are proposed from a live roster, never hardcoded.** Roster changes must not
-    require a prompt change.
+10. **Agents are proposed from a configured roster, never hardcoded.** Roster changes must
+    not require a prompt change.
 11. **Jev is pinned** (`jev-1.13.0`), and the response's reported `model` field is recorded,
     so a silent upgrade cannot invalidate tuned thresholds unnoticed.
 12. **Intervention rate is a first-class metric.** "No input ideally" is only meaningful if
     it's measured.
+13. **The interface is plain locally hosted HTML.** No build step, no framework, no CDN.
+    Chosen for durability and reviewability over convenience (§9).
+14. **No external board, no agent identities.** The board is local SQLite; nothing about the
+    harness requires an account on any external service (§18.1).
 
 ---
 
-## 17. Annex — GitHub Projects as an optional interface
-
-**Status:** Proposed, optional, off by default. Nothing in §1–§16 depends on it.
-
-### 17.1 Design rule: mirror, not source of truth
-
-The local SQLite store remains authoritative. GitHub is a **one-way projection plus a
-human-collaboration surface**. The run loop never blocks on GitHub, never reads GitHub to
-decide its next action, and never mutates local state from a GitHub read except through the
-explicit override path in §17.5.
-
-Rationale beyond rate limits:
-
-- **No transaction semantics.** §10 requires every transition to be atomic with a
-  checkpoint. GitHub offers no transaction; a crash mid-write leaves the mirror stale.
-  Local-first turns that into a reconciliation job instead of a correctness bug.
-- **Judgment payloads must not leave the machine.** `judgment` rows carry raw agent output.
-  Only the derived **band** and **score** cross the boundary — never the request body.
-- **Failure isolation.** A GitHub outage or auth expiry degrades the mirror, not the board.
-- **Write latency.** Every call is a network round trip; inline on the critical path it
-  slows the loop for no benefit.
-
-### 17.2 Measured cost (live probe, 2026-09-20, token scope `project`)
-
-Operational rule: **event-driven, never polling.**
-
-GraphQL point cost, 5,000 points/hr/user budget:
-
-| Operation | Points |
-|---|---|
-| Number field write (score) | 1 |
-| Single-select write (band) | 1 |
-| Issue create | 1 |
-| Board read, 5 items w/ fields | 6 |
-| Board read, 20 items w/ fields | **102** |
-| Project field-list read | **102** |
-| Full tick (20 tasks × 2 writes + 1 read) | 142 (3.46/transition) |
-
-**Writes are cheap; reads are not.** Board reads are N+1 (~5 points/item). A 100-item board
-read costs ~500 points — polling it every 10 seconds exhausts the hourly budget in under
-four minutes. A 100-task project with ~5 transitions each costs ~500 points total, so
-**write volume is a non-issue; read volume is the only real constraint.**
-
-Consequences:
-- Push on transition. Batch all writes for one scheduler tick into one flush.
-- Read only on explicit user action or a post-run reconcile, never in the loop.
-- Token bucket sized at **≤2,000 points/hr** for sync; on exhaustion, sync pauses and the
-  board keeps running. GitHub is never allowed to stall the scheduler.
-
-### 17.3 Field mapping
-
-| Harness | GitHub | Direction |
-|---|---|---|
-| `project.title` | Project title | write |
-| `project.description` | Project README | write |
-| `task` | Issue (or draft item if no repo) | write on create |
-| `task.parent_id` | Sub-issue relationship | write |
-| `edge.kind = blocks` | Native blocked-by dependency | write |
-| `task.state` | Status single-select: Queued / Running / Blocked / Needs Input / Review / Done / Failed | write + **human override** |
-| `task.success_band` | `JevBand` single-select: rework / complete / harvest | write only (§17.5) |
-| `task.success_score` | `JevScore` number 0–10 | write only (§17.5) |
-| `task.attempt` | `Attempts` number | write only |
-| `task.model_tier` | `Tier` single-select | write only |
-| `question` | Issue comment tagged `<!-- jev:question -->` | write |
-| `assumption` | `Assumption` checkbox + comment | write |
-| run cost | `Cost` number (USD) | write only |
-| — | Labels: `jev:managed`, `jev:needs-info`, `jev:spam` | write |
-
-Native sub-issues and blocked-by give the DAG visualization for free — tasks as issues,
-subtasks as sub-issues, `blocks` edges as dependencies.
-
-### 17.4 Sync architecture
-
-- **Outbox.** Every local transition appends a `sync_outbox` row in the same transaction as
-  the state change. A background flusher drains it. Crash-safe by construction: the outbox
-  row and the transition commit together.
-- **Idempotency.** Each outbox row carries a deterministic key
-  (`task_id:attempt:transition`); replay is a no-op.
-- **Reconcile.** On startup and on demand, compare local state to the mirror by a stored
-  `github_id` + `github_updated_at` per record. Divergence is reported, not auto-resolved.
-- **Secrets.** GitHub token read from the environment only, never persisted in project config.
-
-### 17.5 Conflict precedence
-
-The one rule that must not be got wrong:
-
-- **Human edits to `Status` win.** A human dragging a card is the authority. The harness
-  reflects it into the local store as an audited `override` row (who, when, from, to), then
-  proceeds from the new state. This is the *only* path by which GitHub mutates local state.
-- **The harness exclusively owns `JevBand`, `JevScore`, `Attempts`, `Cost`.** These are
-  computed outputs of judgments. A human edit is overwritten on the next tick and the
-  overwrite is logged. Nobody hand-edits a score and has it stick.
-- **Label and title edits are advisory.** Recorded, never acted on.
-
-### 17.6 Issue triage (maintenance mode)
-
-An issue is an **external request for work** — untrusted input, same treatment as any other.
-It is **not** automatically a task: two issues may be one task, one issue may be five.
-
-**Intake chain** (each step may terminate the flow):
-
-1. **Spam gate** (deterministic first: author allowlist, age, rate; then Jev `spam_likelihood`).
-   Fails → label `jev:spam`, no board entry.
-2. **`issue_actionable`** (Noul): is this a request for work at all?
-3. **`issue_mapping`** (Choice): `new_task` / `append_existing` / `split` / `needs_info` /
-   `not_actionable`. Shortlist candidate existing tasks in code (semantic similarity), then
-   judge — never a Choice over the whole backlog.
-4. **`dod_quality`** (§5.1) on the derived DoD — an issue whose DoD cannot be restated
-   testably parks as `needs_input` rather than being delegated.
-5. **`context_relevance`** against the mission statement: in scope, adjacent, or out of scope.
-
-**Every outcome produces a comment**, including rejection — a triage comment explaining
-*why not* is genuine value, not a dead end. Parked issues get a `jev:needs-info` label and a
-question, and re-enter the chain when answered.
-
-**Critical constraint:** an issue can never trigger a destructive or external-effect action.
-The §7.3 authority ceiling applies with no exceptions for externally-authored input.
-
-Note the distinction between the **task state** `needs_input` and the **GitHub label**
-`jev:needs-info`: the label is the human-visible mirror of the task state, and the §17.5
-precedence rules apply to the state, not the label.
-
-### 17.7 Mission state
-
-Maintenance mode needs a persistent statement of intent to triage against:
-
-```
-mission(id, text, constraints, updated_at)
-```
-
-The mission is proposed at project creation, editable in the UI, and versioned — triage
-judgments record `mission_version`, so a mission edit does not silently invalidate prior
-triage decisions.
-
-### 17.8 UI
-
-When sync is enabled, Screen 4 gains an **Open in GitHub** link and a sync-status indicator
-(last push, outbox depth, points spent this hour, last reconcile). The native UI remains
-fully functional with sync off — GitHub is additive, never required.
-
-### 17.9 Acceptance criteria (annex)
-
-- With sync off, the system behaves exactly as specified in §13.
-- A crash between a local transition and its flush reconciles on restart with no duplicate
-  or lost transition (idempotent outbox).
-- Sync exhaustion never stalls the scheduler.
-- No `judgment.request_json` field ever crosses the network boundary.
-- A human `Status` edit becomes an audited override; a human `JevScore` edit is overwritten
-  and the overwrite logged.
-- An issue that fails the spam gate produces no board entry and no `new_task`.
-- An issue-derived DoD that fails `dod_quality` parks as `needs-info`, and never reaches an
-  agent.
-
----
-
-## 18. Explicitly deferred
+## 17. Explicitly deferred
 
 - Multi-project scheduling and shared agent pools
 - Learned thresholds (fit ECE against labelled runs) — calibration work, Stage 2
 - Inter-agent messaging / negotiation protocol
 - Mobile approvals
 - Rubric auto-tuning
-- Bidirectional GitHub live sync (GitHub → local beyond the §17.5 override path)
-- GitHub PR review as a verification signal (PR-as-artifact is a natural follow-on)
-- Multi-repo / org-level boards
+- A maintenance loop driven by a local scheduler tick over a watched repo
+- Any external board, mirror, or issue-tracker integration
+
+---
+
+## 18. Removed from v0.1
+
+### 18.1 GitHub Projects integration (whole annex) — removed
+
+v0.1 carried a GitHub Projects annex: a one-way mirror of the local board, a field mapping,
+an outbox with idempotency keys, a conflict-precedence rule for human `Status` edits, a
+GraphQL rate-budget, and a maintenance-mode issue-triage chain.
+
+It is **removed entirely** in v0.2. The reasons, in order of weight:
+
+- **It requires an identity for every agent.** A mirror means each agent's work must be
+  attributable to a GitHub actor. That pulls account provisioning, tokens, and a
+  per-agent auth surface into a system whose stated scope is one user on one machine.
+- **It is an external dependency for a board that does not need one.** The dashboard
+  renders the board from local SQLite with no round trip, no rate limit, and no outage
+  mode. Mirroring adds a second source of truth to keep reconciled.
+- **No transaction semantics.** The v0.1 spec already admitted this: a crash mid-write
+  leaves the mirror stale, turning a correctness property into a reconciliation job. A
+  local-only board has no such window.
+- **It widens the scope the user asked to narrow.** §1 defines the system as one process,
+  one store, one interface. That is now literally true.
+
+Removed with the annex: `sync_outbox` (dropped from §4), the `github_id` /
+`github_updated_at` reconcile fields, the `JevBand` / `JevScore` / `Attempts` / `Cost`
+field-mapping rationale in §7.5, the `gh_cost_clean.sh` probe and its README section,
+`maintenance` mode (§14), the mission entity, and every §17 reference in the acceptance
+criteria. The `override` entity survives (§4, §7.5) because the dashboard needs it; only
+its GitHub source is gone.
